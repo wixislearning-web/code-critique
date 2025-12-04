@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, status
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 from dotenv import load_dotenv
 
 # Import our modules
@@ -41,13 +41,18 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID")
 GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+# --- CHANGE FOR OPENROUTER ---
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o") # Set a reasonable default
+# --- END CHANGE ---
 JWT_SECRET = os.getenv("JWT_SECRET", "change-this-secret-key")
 
 supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
 db_service = DatabaseService(supabase_client)
 github_service = GitHubService(GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET)
-ai_service = AIService(ANTHROPIC_API_KEY)
+# --- CHANGE FOR OPENROUTER ---
+ai_service = AIService(OPENROUTER_API_KEY, OPENROUTER_MODEL)
+# --- END CHANGE ---
 auth_service = AuthService(JWT_SECRET)
 
 # ============================================================================
@@ -69,9 +74,14 @@ async def health_check():
     ai_ok = True
     
     try:
+        # A lightweight DB check
         await db_service.get_all_users_count()
     except:
         db_ok = False
+        
+    # Check if AI key is present
+    if not OPENROUTER_API_KEY:
+        ai_ok = False
     
     return HealthCheck(
         status="healthy" if (db_ok and ai_ok) else "degraded",
@@ -163,7 +173,10 @@ async def get_current_user_info(current_user: dict = Depends(auth_service.get_cu
     # Get review count
     reviews = await db_service.get_user_reviews(current_user["user_id"])
     user_data["reviews_count"] = len(reviews)
-    user_data["subscription_tier"] = "free"  # Default
+    
+    # Fetch subscription info for current limit/tier
+    subscription = await db_service.get_user_subscription(current_user["user_id"])
+    user_data["subscription_tier"] = subscription.get("tier", "free")
     
     return User(**user_data)
 
@@ -209,12 +222,13 @@ async def process_review_task(
         # Get GitHub token
         github_token = await db_service.get_user_github_token(user_id)
         
-        # Fetch repository contents
-        repo_data = await github_service.fetch_repository_contents(
+        # --- SMART CONTEXT FETCH ---
+        # Call the new, efficient smart fetch method
+        repo_data = await github_service.fetch_repository_smart(
             github_token, 
-            repo_full_name,
-            max_files=50
+            repo_full_name
         )
+        # --- END SMART CONTEXT FETCH ---
         
         # Analyze with AI
         feedback = await ai_service.analyze_repository(repo_data, focus_areas, context)
@@ -232,9 +246,13 @@ async def process_review_task(
         # Increment review count
         await db_service.increment_reviews_used(user_id)
         
+    except HTTPException as he:
+        print(f"Error processing review (HTTP): {he.detail}")
+        await db_service.update_review_error(review_id, he.detail)
     except Exception as e:
-        print(f"Error processing review: {e}")
-        await db_service.update_review_error(review_id, str(e))
+        error_msg = f"An unexpected error occurred during review: {str(e)}"
+        print(error_msg)
+        await db_service.update_review_error(review_id, error_msg)
 
 @app.post("/reviews", response_model=Review, status_code=status.HTTP_201_CREATED)
 async def create_review(
@@ -245,12 +263,12 @@ async def create_review(
     """Create a new code review"""
     
     # Check if user has reviews remaining
-    has_reviews = await db_service.check_review_limit(current_user["user_id"])
+    subscription = await db_service.get_user_subscription(current_user["user_id"])
     
-    if not has_reviews:
+    if subscription["reviews_used_this_month"] >= subscription["reviews_limit"]:
         raise HTTPException(
             status_code=403,
-            detail="Review limit reached. Upgrade to Pro for unlimited reviews."
+            detail=f"Review limit reached for your '{subscription['tier']}' tier. Upgrade to Pro for unlimited reviews."
         )
     
     # Create review record
@@ -287,7 +305,8 @@ async def get_reviews(current_user: dict = Depends(auth_service.get_current_user
     
     summaries = []
     for review in reviews:
-        feedback_count = len(review.get("feedback", [])) if review.get("feedback") else None
+        # Corrected to default to 0 if feedback is null
+        feedback_count = len(review.get("feedback", [])) if review.get("feedback") else 0
         summaries.append(ReviewSummary(
             id=review["id"],
             repo_name=review["repo_name"],
@@ -327,8 +346,9 @@ async def delete_review(
     if not review:
         raise HTTPException(status_code=404, detail="Review not found")
     
-    # Delete from database (implement in database.py if needed)
-    # For now, just return success
+    # Implement actual deletion in database.py
+    # await db_service.delete_review(review_id, current_user["user_id"])
+    
     return None
 
 # ============================================================================
