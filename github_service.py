@@ -8,7 +8,7 @@ from models import Repository, RepositoryData, RepositoryFile
 logger = logging.getLogger(__name__)
 
 class GitHubService:
-    """GitHub API integration service"""
+    """GitHub API integration service - Optimized for Smart Context"""
     
     def __init__(self, client_id: str, client_secret: str):
         self.client_id = client_id
@@ -91,129 +91,125 @@ class GitHubService:
                 )
                 for repo in repos_data
             ]
-    
-    async def get_repository_tree(self, access_token: str, repo_full_name: str) -> Dict:
-        """Get repository file tree"""
-        async with httpx.AsyncClient() as client:
-            # Try main branch
-            response = await client.get(
-                f"{self.base_url}/repos/{repo_full_name}/git/trees/main",
-                headers={
-                    "Authorization": f"Bearer {access_token}",
-                    "Accept": "application/vnd.github.v3+json"
-                },
-                params={"recursive": "1"},
-                timeout=30.0
-            )
-            
-            # Try master if main fails
-            if response.status_code == 404:
-                response = await client.get(
-                    f"{self.base_url}/repos/{repo_full_name}/git/trees/master",
-                    headers={
-                        "Authorization": f"Bearer {access_token}",
-                        "Accept": "application/vnd.github.v3+json"
-                    },
-                    params={"recursive": "1"},
-                    timeout=30.0
-                )
-            
-            if response.status_code != 200:
-                raise HTTPException(status_code=400, detail="Failed to fetch repository tree")
-            
-            return response.json()
-    
-    async def get_file_content(self, access_token: str, file_url: str) -> Optional[str]:
-        """Get file content"""
-        async with httpx.AsyncClient() as client:
-            try:
-                response = await client.get(
-                    file_url,
-                    headers={
-                        "Authorization": f"Bearer {access_token}",
-                        "Accept": "application/vnd.github.v3.raw"
-                    },
-                    timeout=30.0
-                )
-                return response.text if response.status_code == 200 else None
-            except:
-                return None
-    
+
     def _is_code_file(self, file_path: str) -> bool:
-        """Check if file is code"""
-        code_extensions = {
-            '.py', '.js', '.jsx', '.ts', '.tsx', '.java', '.cpp', '.c', '.go',
-            '.rb', '.php', '.html', '.css', '.scss', '.json', '.yaml', '.yml',
-            '.md', '.sql', '.sh', '.rs', '.swift', '.kt', '.dart'
+        """Check if file is code and not a common dependency/config file"""
+        code_exts = {
+            '.py', '.js', '.jsx', '.ts', '.tsx', '.java', '.go', '.rb', '.php', 
+            '.html', '.css', '.scss', '.sql', '.rs', '.dart', '.swift', '.kt', '.md', '.json', '.yml', '.yaml'
         }
-        _, ext = os.path.splitext(file_path.lower())
-        return ext in code_extensions
+        name, ext = os.path.splitext(file_path.lower())
+        
+        # Heuristics to skip less relevant files even if they have an extension
+        if name.endswith(('_min', '.test', '.spec')) or ext in ('.lock', '.map', '.log'):
+             return False
+        
+        return ext in code_exts
     
     def _should_skip_path(self, file_path: str) -> bool:
-        """Check if path should be skipped"""
-        skip = ['node_modules/', '.git/', '__pycache__/', 'venv/', 'dist/', 'build/']
+        """Check if path should be skipped (e.g., node_modules, build artifacts)"""
+        skip = ['node_modules/', '.git/', '__pycache__/', 'venv/', 'dist/', 'build/', 'coverage/', 'package-lock.json', 'yarn.lock', '.idea/', '.vscode/']
         return any(pattern in file_path for pattern in skip)
-    
-    async def fetch_repository_contents(
-        self,
-        access_token: str,
-        repo_full_name: str,
-        max_files: int = 50
-    ) -> RepositoryData:
-        """Fetch repository contents"""
-        tree_data = await self.get_repository_tree(access_token, repo_full_name)
-        
-        files: List[RepositoryFile] = []
-        total_size = 0
-        language_stats: Dict[str, int] = {}
-        
-        for item in tree_data.get("tree", []):
-            if item["type"] != "blob" or len(files) >= max_files:
-                continue
-            
-            file_path = item["path"]
-            
-            if not self._is_code_file(file_path) or self._should_skip_path(file_path):
-                continue
-            
-            file_size = item.get("size", 0)
-            if file_size > 50000:  # Skip large files
-                continue
-            
-            content = await self.get_file_content(access_token, item["url"])
-            
-            if content:
-                _, ext = os.path.splitext(file_path)
-                language = self._detect_language(ext)
-                
-                files.append(RepositoryFile(
-                    path=file_path,
-                    content=content,
-                    size=file_size,
-                    language=language
-                ))
-                
-                total_size += file_size
-                if language:
-                    language_stats[language] = language_stats.get(language, 0) + file_size
-        
-        primary_language = max(language_stats, key=language_stats.get) if language_stats else None
-        
-        return RepositoryData(
-            repo_full_name=repo_full_name,
-            files=files,
-            file_count=len(files),
-            total_size=total_size,
-            primary_language=primary_language,
-            languages=language_stats
-        )
-    
+
     def _detect_language(self, extension: str) -> Optional[str]:
         """Detect language from extension"""
-        language_map = {
-            '.py': 'Python', '.js': 'JavaScript', '.ts': 'TypeScript',
-            '.java': 'Java', '.cpp': 'C++', '.c': 'C', '.go': 'Go',
-            '.rb': 'Ruby', '.php': 'PHP', '.rs': 'Rust', '.swift': 'Swift',
-            '.kt': 'Kotlin', '.dart': 'Dart', '.html': 'HTML', '.css': 'CSS'
+        mapping = {
+            '.py': 'Python', '.js': 'JavaScript', '.ts': 'TypeScript', '.html': 'HTML',
+            '.css': 'CSS', '.sql': 'SQL', '.java': 'Java', '.go': 'Go', '.rb': 'Ruby',
+            '.php': 'PHP', '.rs': 'Rust', '.swift': 'Swift', '.kt': 'Kotlin', '.dart': 'Dart',
+            '.md': 'Markdown', '.json': 'JSON', '.yml': 'YAML', '.yaml': 'YAML'
         }
-        return language_map.get(extension.lower())
+        return mapping.get(extension.lower(), 'Other')
+
+    async def fetch_repository_smart(self, access_token: str, repo_full_name: str) -> RepositoryData:
+        """
+        Smart Fetch: 
+        1. Gets the file tree (for architecture context).
+        2. Downloads content only for code files that are NOT large/binary (< 30KB).
+        """
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            
+            # 1. Get Tree
+            tree_urls = [
+                f"{self.base_url}/repos/{repo_full_name}/git/trees/main?recursive=1",
+                f"{self.base_url}/repos/{repo_full_name}/git/trees/master?recursive=1"
+            ]
+            
+            res = None
+            for url in tree_urls:
+                res = await client.get(url, headers={"Authorization": f"Bearer {access_token}"})
+                if res.status_code == 200:
+                    break
+            
+            if not res or res.status_code != 200:
+                raise HTTPException(status_code=404, detail="Repository tree not found on 'main' or 'master' branch.")
+            
+            tree_data = res.json().get("tree", [])
+            
+            files: List[RepositoryFile] = []
+            total_size = 0
+            language_stats: Dict[str, int] = {}
+            MAX_FILE_SIZE_TO_FETCH = 30000 # 30 KB
+            MAX_FILES_TO_FETCH = 70 
+            
+            # 2. Process Tree items
+            for item in tree_data:
+                path = item["path"]
+                
+                # Check file limits
+                if len(files) >= MAX_FILES_TO_FETCH:
+                    break
+                
+                # Skip non-code, irrelevant folders, or directories
+                if item["type"] != "blob" or self._should_skip_path(path) or not self._is_code_file(path):
+                    continue
+                    
+                size = item.get("size", 0)
+                _, ext = os.path.splitext(path)
+                language = self._detect_language(ext)
+                
+                repo_file = RepositoryFile(
+                    path=path,
+                    content="", # Default empty content
+                    size=size,
+                    language=language
+                )
+                
+                # Only download content if it's small enough for the AI context window
+                if size > 0 and size <= MAX_FILE_SIZE_TO_FETCH:
+                    try:
+                        # Use raw.githubusercontent.com for efficient content fetching
+                        sha = res.json().get('sha', 'main')
+                        raw_url = f"https://raw.githubusercontent.com/{repo_full_name}/{sha}/{path}"
+                        
+                        raw_res = await client.get(raw_url)
+                        
+                        if raw_res.status_code == 200:
+                            repo_file.content = raw_res.text
+                        else:
+                            # Fallback to blob API if raw fails (though this is less common for code)
+                            blob_res = await client.get(
+                                item["url"], 
+                                headers={"Authorization": f"Bearer {access_token}", "Accept": "application/vnd.github.v3.raw"}
+                            )
+                            if blob_res.status_code == 200:
+                                repo_file.content = blob_res.text
+
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch content for {path}: {e}")
+                
+                files.append(repo_file)
+                total_size += size
+                if language:
+                    language_stats[language] = language_stats.get(language, 0) + size
+
+            primary_language = max(language_stats, key=language_stats.get) if language_stats else "Unknown"
+
+            return RepositoryData(
+                repo_full_name=repo_full_name,
+                files=files,
+                file_count=len(files),
+                total_size=total_size,
+                primary_language=primary_language,
+                languages=language_stats
+            )
